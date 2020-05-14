@@ -62,8 +62,8 @@ Seetharaman](https://github.com/pseeth/pytorch-stft) as described in our code.
 [IAF]: https://arxiv.org/abs/1606.04934
 [ignored]: https://github.com/NVIDIA/flowtron/config.json#L12
 [paper]: https://arxiv.org/abs/2005.05957
-[Flowtron LJS]: https://www.github.com/NVIDIA/Flowtron
-[Flowtron LibriTTS]: https://www.github.com/NVIDIA/Flowtron
+[Flowtron LJS]: https://drive.google.com/open?id=1Cjd6dK_eFz6DE0PKXKgKxrzTUqzzUDW-
+[Flowtron LibriTTS]: https://drive.google.com/open?id=1KhJcPawFgmfvwV7tQAOeC253rYstLrs8
 [WaveGlow]: https://drive.google.com/file/d/1WsibBTsuRg_SF2Z6L6NFRTT-NjEy1oTx/view?usp=sharing
 [PyTorch]: https://github.com/pytorch/pytorch#installation
 [website]: https://nv-adlr.github.io/Flowtron
