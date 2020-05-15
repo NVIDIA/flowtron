@@ -37,7 +37,7 @@ from glow import WaveGlow
 from scipy.io.wavfile import write
 
 
-def infer(flowtron_path, waveglow_path, text, speaker_id, n_frames, sigma,
+def infer(flowtron_path, waveglow_path, output_dir, text, speaker_id, n_frames, sigma,
           seed):
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
@@ -74,7 +74,7 @@ def infer(flowtron_path, waveglow_path, text, speaker_id, n_frames, sigma,
         fig, axes = plt.subplots(1, 2, figsize=(16, 4))
         axes[0].imshow(mels[0].cpu().numpy(), origin='bottom', aspect='auto')
         axes[1].imshow(attention[:, 0].transpose(), origin='bottom', aspect='auto')
-        fig.savefig('sid{}_sigma{}_attnlayer{}.png'.format(speaker_id, sigma, k))
+        fig.savefig(os.path.join(output_dir, 'sid{}_sigma{}_attnlayer{}.png'.format(speaker_id, sigma, k)))
         plt.close("all")
 
     audio = waveglow.infer(mels.half(), sigma=0.8).float()
@@ -82,7 +82,8 @@ def infer(flowtron_path, waveglow_path, text, speaker_id, n_frames, sigma,
     # normalize audio for now
     audio = audio / np.abs(audio).max()
     print(audio.shape)
-    write("sid{}_sigma{}.wav".format(speaker_id, sigma),
+
+    write(os.path.join(output_dir, 'sid{}_sigma{}.wav'.format(speaker_id, sigma)),
           data_config['sampling_rate'], audio)
 
 
@@ -116,7 +117,12 @@ if __name__ == "__main__":
     global model_config
     model_config = config["model_config"]
 
+    # Make directory if it doesn't exist
+    if not os.path.isdir(args.output_dir):
+        os.makedirs(args.output_dir)
+        os.chmod(args.output_dir, 0o775)
+
     torch.backends.cudnn.enabled = True
     torch.backends.cudnn.benchmark = False
-    infer(args.flowtron_path, args.waveglow_path, args.text, args.id,
+    infer(args.flowtron_path, args.waveglow_path, args.output_dir, args.text, args.id,
           args.n_frames, args.sigma, args.seed)
