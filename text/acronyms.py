@@ -33,9 +33,7 @@ _letter_to_arpabet = {
 
 # must ignore roman numerals
 _acronym_re = re.compile(r'([A-Z][A-Z]+)s?|([A-Z]\.([A-Z]\.)+s?)')
-cmudict = CMUDict(
-    '/home/scratch.adlr-gcf/audio_denoising/datasets/cmu_dict/cmudict-0.7b',
-    keep_ambiguous=False)
+cmudict = CMUDict('data/cmudict_dictionary', keep_ambiguous=False)
 
 
 def _expand_acronyms(m, add_spaces=True):
