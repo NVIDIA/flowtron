@@ -117,5 +117,4 @@ def files_to_list(filename):
     files = [f.rstrip() for f in files]
     return files
 
-HETERONYMS = set(files_to_list(
-    '/home/scratch.adlr-gcf/audio_denoising/datasets/cmu_dict/heteronyms'))
+HETERONYMS = set(files_to_list('data/heteronyms'))
