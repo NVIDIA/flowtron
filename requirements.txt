@@ -7,5 +7,4 @@ Unidecode==1.0.22
 pillow
 tensorboardX
 tensorboard
-tensorflow
 glow
