@@ -64,7 +64,7 @@ Seetharaman](https://github.com/pseeth/pytorch-stft) as described in our code.
 [paper]: https://arxiv.org/abs/2005.05957
 [Flowtron LJS]: https://drive.google.com/open?id=1Cjd6dK_eFz6DE0PKXKgKxrzTUqzzUDW-
 [Flowtron LibriTTS]: https://drive.google.com/open?id=1KhJcPawFgmfvwV7tQAOeC253rYstLrs8
-[WaveGlow]: https://drive.google.com/file/d/1WsibBTsuRg_SF2Z6L6NFRTT-NjEy1oTx/view?usp=sharing
+[WaveGlow]: https://drive.google.com/open?id=1rpK8CzAAirq9sWZhe9nlfvxMF1dRgFbF
 [PyTorch]: https://github.com/pytorch/pytorch#installation
 [website]: https://nv-adlr.github.io/Flowtron
 [AMP]: https://github.com/NVIDIA/apex/tree/master/apex/amp
