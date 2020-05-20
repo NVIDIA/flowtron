@@ -610,15 +610,15 @@ class Flowtron(torch.nn.Module):
 
         attention_weights = []
         for i, flow in enumerate(reversed(self.flows)):
-            if hasattr(flow, 'gate_layer'):
-                flow.gate_threshold = gate_threshold
-
-            if hasattr(flow, 'attention_layer'):
-                flow.attention_layer.temperature = temperature
-            else:
-                flow.ar_step.attention_layer.temperature = temperature
-
+            self.set_temperature_and_gate(flow, temperature, gate_threshold)
             residual, attention_weight = flow.infer(residual, encoder_outputs)
             attention_weights.append(attention_weight)
 
         return residual.permute(1, 2, 0), attention_weights
+
+    @staticmethod
+    def set_temperature_and_gate(flow, temperature, gate_threshold):
+        flow = flow.ar_step if hasattr(flow, "ar_step") else flow
+        flow.attention_layer.temperature = temperature
+        if hasattr(flow, 'gate_layer'):
+            flow.gate_threshold = gate_threshold
