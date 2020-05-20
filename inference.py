@@ -37,8 +37,8 @@ from glow import WaveGlow
 from scipy.io.wavfile import write
 
 
-def infer(flowtron_path, waveglow_path, output_dir, text, speaker_id, n_frames, sigma,
-          seed):
+def infer(flowtron_path, waveglow_path, output_dir, text, speaker_id, n_frames,
+          sigma, gate_threshold, seed):
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
 
@@ -67,7 +67,8 @@ def infer(flowtron_path, waveglow_path, output_dir, text, speaker_id, n_frames, 
 
     with torch.no_grad():
         residual = torch.cuda.FloatTensor(1, 80, n_frames).normal_() * sigma
-        mels, attentions = model.infer(residual, speaker_vecs, text)
+        mels, attentions = model.infer(
+            residual, speaker_vecs, text, gate_threshold=gate_threshold)
 
     for k in range(len(attentions)):
         attention = torch.cat(attentions[k]).cpu().numpy()
@@ -102,6 +103,7 @@ if __name__ == "__main__":
                         default=400, type=int)
     parser.add_argument('-o', "--output_dir", default="results/")
     parser.add_argument("-s", "--sigma", default=0.5, type=float)
+    parser.add_argument("-g", "--gate", default=0.5, type=float)
     parser.add_argument("--seed", default=1234, type=int)
     args = parser.parse_args()
 
@@ -124,5 +126,5 @@ if __name__ == "__main__":
 
     torch.backends.cudnn.enabled = True
     torch.backends.cudnn.benchmark = False
-    infer(args.flowtron_path, args.waveglow_path, args.output_dir, args.text, args.id,
-          args.n_frames, args.sigma, args.seed)
+    infer(args.flowtron_path, args.waveglow_path, args.output_dir, args.text,
+          args.id, args.n_frames, args.sigma, args.gate, args.seed)
