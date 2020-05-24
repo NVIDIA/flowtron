@@ -174,7 +174,7 @@ def train(n_gpus, rank, output_directory, epochs, learning_rate, weight_decay,
     if n_gpus > 1:
         init_distributed(rank, n_gpus, **dist_config)
 
-    criterion = FlowtronLoss(sigma, bool(model_config['n_components']),
+    criterion = FlowtronLoss(sigma, model_config['n_components'] > 1,
                              model_config['use_gate_layer'])
     model = Flowtron(**model_config).cuda()
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate,
