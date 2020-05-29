@@ -589,7 +589,7 @@ class Flowtron(torch.nn.Module):
             [text, speaker_vecs.expand(text.size(0), -1, -1)], 2)
         log_s_list = []
         attns_list = []
-        mask = ~get_mask_from_lengths(in_lens)[..., None]
+        mask = ~get_mask_from_lengths(in_lens)[..., None].bool()
         for i, flow in enumerate(self.flows):
             mel, log_s, gate, attn = flow(
                 mel, encoder_outputs, mask, out_lens)
