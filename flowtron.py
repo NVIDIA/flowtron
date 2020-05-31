@@ -545,7 +545,7 @@ class Flowtron(torch.nn.Module):
         self.speaker_embedding = torch.nn.Embedding(n_speakers, n_speaker_dim)
         self.embedding = torch.nn.Embedding(n_text, n_text_dim)
         self.flows = torch.nn.ModuleList()
-        self.encoder = Encoder(norm_fn=norm_fn)
+        self.encoder = Encoder(norm_fn=norm_fn, encoder_embedding_dim=n_text_dim)
         self.dummy_speaker_embedding = dummy_speaker_embedding
 
         if n_components > 1:
