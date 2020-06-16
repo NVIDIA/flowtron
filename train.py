@@ -183,7 +183,7 @@ def train(n_gpus, rank, output_directory, epochs, learning_rate, weight_decay,
     # Load checkpoint if one exists
     iteration = 0
     if warmstart_checkpoint_path != "":
-        model = warmstart(warmstart_checkpoint_path, model)
+        model = warmstart(warmstart_checkpoint_path, model, include_layers)
 
     if checkpoint_path != "":
         model, optimizer, iteration = load_checkpoint(checkpoint_path, model,
