@@ -12,7 +12,7 @@
 	"ignore_layers": [],
         "include_layers": ["speaker", "encoder", "embedding"],
         "warmstart_checkpoint_path": "",
-	    "with_tensorboard": true,
+	"with_tensorboard": true,
         "fp16_run": false
     },
     "data_config": {
