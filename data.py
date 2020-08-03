@@ -156,7 +156,6 @@ class DataCollate():
 # Useful for making test sets
 # ===================================================================
 if __name__ == "__main__":
-    # Get defaults so it can work with no Sacred
     parser = argparse.ArgumentParser()
     parser.add_argument('-c', '--config', type=str,
                         help='JSON file for configuration')
