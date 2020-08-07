@@ -41,7 +41,7 @@ Visit our [website] for audio samples.
 Training using a pre-trained model can lead to faster convergence.
 Dataset dependent layers can be [ignored]
 
-1. (WIP) Download our published [Flowtron LJS] or [Flowtron LibriTTS] model
+1. Download our published [Flowtron LJS] or [Flowtron LibriTTS] model
 2. `python train.py -c config.json -p train_config.ignore_layers=["speaker_embedding.weight"] train_config.checkpoint_path="models/flowtron_ljs.pt"`
 
 ## Multi-GPU (distributed) and Automatic Mixed Precision Training ([AMP])
