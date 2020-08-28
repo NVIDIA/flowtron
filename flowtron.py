@@ -398,7 +398,7 @@ class AR_Back_Step(torch.nn.Module):
         mel, log_s, gates, attn = self.ar_step(mel, text, mask, out_lens)
 
         # move padded zeros back to beginning
-        for k in range(1, mel.size(1)):
+        for k in range(mel.size(1)):
             mel[:, k] = mel[:, k].roll(-out_lens[k].item(), dims=0)
 
         return torch.flip(mel, (0, )), log_s, gates, attn
