@@ -392,7 +392,7 @@ class AR_Back_Step(torch.nn.Module):
     def forward(self, mel, text, mask, out_lens):
         mel = torch.flip(mel, (0, ))
         # backwards flow, send padded zeros back to end
-        for k in range(1, mel.size(1)):
+        for k in range(mel.size(1)):
             mel[:, k] = mel[:, k].roll(out_lens[k].item(), dims=0)
 
         mel, log_s, gates, attn = self.ar_step(mel, text, mask, out_lens)
