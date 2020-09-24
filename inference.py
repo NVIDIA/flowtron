@@ -78,7 +78,9 @@ def infer(flowtron_path, waveglow_path, output_dir, text, speaker_id, n_frames,
         fig.savefig(os.path.join(output_dir, 'sid{}_sigma{}_attnlayer{}.png'.format(speaker_id, sigma, k)))
         plt.close("all")
 
-    audio = waveglow.infer(mels.half(), sigma=0.8).float()
+    with torch.no_grad():
+        audio = waveglow.infer(mels.half(), sigma=0.8).float()
+
     audio = audio.cpu().numpy()[0]
     # normalize audio for now
     audio = audio / np.abs(audio).max()
