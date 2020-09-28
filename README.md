@@ -34,8 +34,9 @@ Visit our [website] for audio samples.
 
 ## Training
 1. Update the filelists inside the filelists folder to point to your data
-2. `python train.py -c config.json -p train_config.output_directory=outdir`
-3. (OPTIONAL) `tensorboard --logdir=outdir/logdir`
+2. (OPTIONAL) If your filelist have no speaker ids inside, you can add dummy speaker id. `sed -e 's/$/|0/' -i your_filelist.txt`
+3. `python train.py -c config.json -p train_config.output_directory=outdir`
+4. (OPTIONAL) `tensorboard --logdir=outdir/logdir`
 
 ## Training using a pre-trained model
 Training using a pre-trained model can lead to faster convergence.
