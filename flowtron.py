@@ -213,7 +213,7 @@ class MelEncoder(nn.Module):
         # sort the data by decreasing length using provided index
         # we assume batch index is in dim=1
         padded_data = padded_data[:, sorted_idx]
-        padded_data = nn.utils.rnn.pack_padded_sequence(padded_data, lens)
+        padded_data = nn.utils.rnn.pack_padded_sequence(padded_data, lens.cpu())
         hidden_vectors = recurrent_model(padded_data)[0]
         hidden_vectors, _ = nn.utils.rnn.pad_packed_sequence(hidden_vectors)
         # unsort the results at dim=1 and return
@@ -320,7 +320,7 @@ class Encoder(nn.Module):
             for conv in self.convolutions:
                 x = F.dropout(F.relu(conv(x)), 0.5, self.training)
             x = x.transpose(1, 2)
-        x = nn.utils.rnn.pack_padded_sequence(x, in_lens, batch_first=True)
+        x = nn.utils.rnn.pack_padded_sequence(x, in_lens.cpu(), batch_first=True)
 
         self.lstm.flatten_parameters()
         outputs, _ = self.lstm(x)
@@ -448,7 +448,7 @@ class AR_Step(torch.nn.Module):
         # sort the data by decreasing length using provided index
         # we assume batch index is in dim=1
         padded_data = padded_data[:, sorted_idx]
-        padded_data = nn.utils.rnn.pack_padded_sequence(padded_data, lens)
+        padded_data = nn.utils.rnn.pack_padded_sequence(padded_data, lens.cpu())
         hidden_vectors = recurrent_model(padded_data)[0]
         hidden_vectors, _ = nn.utils.rnn.pad_packed_sequence(hidden_vectors)
         # unsort the results at dim=1 and return
