@@ -50,6 +50,9 @@ Dataset dependent layers can be [ignored]
 ## Inference demo
 1. `python inference.py -c config.json -f models/flowtron_ljs.pt -w models/waveglow_256channels_v4.pt -t "It is well know that deep generative models have a deep latent space!" -i 0`
 
+## Export to ONNX format
+1. `python export_onnx.py -c config_onnx.json -f models/flowtron_libritts.pt -w models/waveglow_256channels_universal_v5.pt -i 83`
+
 ## Related repos
 [WaveGlow](https://github.com/NVIDIA/WaveGlow) Faster than real time Flow-based
 Generative Network for Speech Synthesis
