@@ -44,10 +44,10 @@ class AR_Back_Step(torch.nn.Module):
                                n_attn_channels, n_lstm_layers, add_gate)
 
     def forward(self, residual, text):
-        residual, gates = self.ar_step(
+        residual, gate = self.ar_step(
             torch.flip(residual, (0, )), text)
         residual = torch.flip(residual, (0, ))
-        return residual, gates
+        return residual, gate
 
     def trace_layers(self):
         self.ar_step.trace_layers()
@@ -135,35 +135,14 @@ class AR_Step(torch.nn.Module):
         )
 
     def forward(self, residual, text):
-        total_output = []  # seems 10FPS faster than pre-allocation
+        total_output = []
         gate_total = []
-        dummy = torch.zeros([1, residual.size(1), residual.size(2)], device=residual.device)
+        output = torch.zeros([1, residual.size(1), residual.size(2)], device=residual.device)
         (h, c) = (torch.zeros([1, 1, 1024], dtype=torch.float, device='cuda'),
                   torch.zeros([1, 1, 1024], dtype=torch.float, device='cuda'))
-
-        attention_hidden, (h, c) = self.attention_lstm(dummy, (h, c))
-        attention_context, attention_weight = self.attention_layer(
-            attention_hidden, text, text)
-        attention_context = attention_context.permute(2, 0, 1)
-        decoder_input = torch.cat((attention_hidden, attention_context), -1)
         (h1, c1) = (torch.zeros([2, 1, 1024], dtype=torch.float, device='cuda'),
                     torch.zeros([2, 1, 1024], dtype=torch.float, device='cuda'))
-        lstm_hidden, (h1, c1) = self.lstm(decoder_input, (h1, c1))
-        lstm_hidden = self.dense_layer(lstm_hidden).permute(1, 2, 0)
-        decoder_output = self.conv(lstm_hidden).permute(2, 0, 1)
-
-        log_s = decoder_output[:, :, :decoder_output.size(2)//2]
-        b = decoder_output[:, :, decoder_output.size(2)//2:]
-        output = (residual[0, :, :] - b)/torch.exp(log_s)
-        total_output.append(output)
-        i = torch.tensor(1, dtype=torch.long)
-        lim = torch.tensor(residual.size(0), dtype=torch.long)
-        gate_total.append(
-            torch.sigmoid(self.gate_layer(decoder_input)).view([1])
-            if self.add_gate else torch.tensor([0], dtype=torch.float, device=output.device)
-        )
-        # more than one condition raises errors in onnx for some reason, so just returning gate layer instead
-        while i < lim:
+        for i in range(int(residual.size(0))):
             attention_hidden, (h, c) = self.attention_lstm(output, (h, c))
             attention_context, attention_weight = self.attention_layer(
                 attention_hidden, text, text
@@ -176,13 +155,13 @@ class AR_Step(torch.nn.Module):
 
             log_s = decoder_output[:, :, :decoder_output.size(2)//2]
             b = decoder_output[:, :, decoder_output.size(2)//2:]
-            output = (residual[i, :, :] - b)/torch.exp(log_s)
-            gate_total.append(
-                torch.sigmoid(self.gate_layer(decoder_input)).view([1])
-                if self.add_gate else torch.tensor([0], dtype=torch.float, device=output.device)
-            )
-            total_output.append(output)
-            i += 1
+            output = (residual[i, :, :].unsqueeze(0) - b)/torch.exp(log_s)
+            gate_total += [
+                torch.sigmoid(self.gate_layer(decoder_input)).reshape([1])
+                if self.add_gate else
+                torch.tensor([0], dtype=torch.float, device=output.device)
+            ]
+            total_output += [output]
         total_output = torch.cat(total_output, 0)
         return total_output, torch.cat(gate_total, 0)
 
@@ -197,7 +176,7 @@ class Flowtron(torch.nn.Module):
                  temperature=1, gate_threshold=0.5):
 
         super(Flowtron, self).__init__()
-        norm_fn = nn.InstanceNorm1d
+        norm_fn = InstanceNorm
         self.speaker_embedding = torch.nn.Embedding(n_speakers, n_speaker_dim)
         self.embedding = torch.nn.Embedding(n_text, n_text_dim)
         self.flows = torch.nn.ModuleList()
@@ -249,9 +228,10 @@ class Flowtron(torch.nn.Module):
         residual = residual.permute(2, 0, 1)
         for flow in reversed(self.flows):
             residual, gates = flow(residual, encoder_outputs)
-            gate_trigger_id_tuple = torch.nonzero(gates > self.gate_threshold, as_tuple=True)
-            if gate_trigger_id_tuple[0].nelement() > 0:
-                residual = residual[:gate_trigger_id_tuple[0].item(), ...]
+            gate_trigger_id_tuple = torch.nonzero(gates.double() > self.gate_threshold)
+            if gate_trigger_id_tuple.nelement() > 0:
+                indices = torch.arange(gate_trigger_id_tuple[0][0], device=residual.device)
+                residual = residual.flip(0).index_select(0, indices).flip(0)
         return residual.permute(1, 2, 0)
 
     @staticmethod
@@ -260,6 +240,18 @@ class Flowtron(torch.nn.Module):
         flow.attention_layer.temperature = temperature
         if hasattr(flow, 'gate_layer'):
             flow.gate_threshold = gate_threshold
+
+
+class InstanceNorm(torch.nn.modules.instancenorm._InstanceNorm):
+    def __init__(self, *args, **kwargs):
+        super(InstanceNorm, self).__init__(*args, **kwargs)
+
+    def forward(self, x):
+        mn = x.mean(-1).detach().unsqueeze(-1)
+        sd = x.std(-1).detach().unsqueeze(-1)
+
+        x = ((x - mn) / (sd + 1e-8)) * self.weight.view(1, -1, 1) + self.bias.view(1, -1, 1)
+        return x
 
 
 class FlowtronTTS(torch.nn.Module):
