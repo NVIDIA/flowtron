@@ -28,8 +28,11 @@ class FlowtronLogger(SummaryWriter):
             self.add_scalar("training.loss", loss, iteration)
             self.add_scalar("learning.rate", learning_rate, iteration)
 
-    def log_validation(self, loss, attns, gate_pred, gate_out, iteration):
-        self.add_scalar("validation.loss", loss, iteration)
+    def log_validation(self, loss, loss_nll, loss_gate, attns, gate_pred,
+                       gate_out, iteration):
+        self.add_scalar("validation_loss", loss, iteration)
+        self.add_scalar("validation_loss_nll", loss_nll, iteration)
+        self.add_scalar("validation_loss_gate", loss_gate, iteration)
 
         idx = random.randint(0, len(gate_out) - 1)
         for i in range(len(attns)):
