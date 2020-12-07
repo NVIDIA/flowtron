@@ -30,8 +30,33 @@ def get_mask_from_lengths(lengths):
     """
     max_len = torch.max(lengths).item()
     ids = torch.arange(0, max_len, out=torch.cuda.LongTensor(max_len))
-    mask = (ids < lengths.unsqueeze(1)).byte()
+    mask = (ids < lengths.unsqueeze(1)).bool()
     return mask
+
+
+class AttentionConditioningLayer(nn.Module):
+    """Adapted from the LocationLayer in https://github.com/NVIDIA/tacotron2/blob/master/model.py
+    1D Conv model over a concatenation of the previous attention and the accumulated attention values
+    """
+    def __init__(self, input_dim=2, attention_n_filters=32, attention_kernel_sizes=[5, 3],
+                 attention_dim=640):
+        super(AttentionConditioningLayer, self).__init__()
+
+        self.location_conv_hidden = ConvNorm(input_dim, attention_n_filters,
+                                             kernel_size=attention_kernel_sizes[0],
+                                             padding=None, bias=True, stride=1,
+                                             dilation=1, w_init_gain='relu')
+        self.location_conv_out = ConvNorm(attention_n_filters, attention_dim,
+                                          kernel_size=attention_kernel_sizes[1],
+                                          padding=None, bias=True, stride=1,
+                                          dilation=1, w_init_gain='sigmoid')
+        self.conv_layers = nn.Sequential(self.location_conv_hidden,
+                                         nn.ReLU(),
+                                         self.location_conv_out,
+                                         nn.Sigmoid())
+
+    def forward(self, attention_weights_cat):
+        return self.conv_layers(attention_weights_cat)
 
 
 class FlowtronLoss(torch.nn.Module):
@@ -76,14 +101,15 @@ class FlowtronLoss(torch.nn.Module):
             loss = torch.sum(z*z)/(2*self.sigma*self.sigma) - log_s_total
         loss = loss / (n_elements * n_mel_dims)
 
+        gate_loss = torch.zeros(1, device=z.device)
         if self.gate_loss:
             gate_pred = (gate_pred * mask)
             gate_pred = gate_pred[..., 0].permute(1, 0)
             gate_loss = self.gate_criterion(gate_pred, gate_target)
-            gate_loss = (gate_loss.permute(1, 0)*mask[:, :, 0]).sum()/n_elements
-            loss = gate_loss + loss
+            gate_loss = gate_loss.permute(1, 0) * mask[:, :, 0]
+            gate_loss = gate_loss.sum() / n_elements
 
-        return loss
+        return loss, gate_loss
 
 
 class LinearNorm(torch.nn.Module):
@@ -320,7 +346,7 @@ class Encoder(nn.Module):
             for conv in self.convolutions:
                 x = F.dropout(F.relu(conv(x)), 0.5, self.training)
             x = x.transpose(1, 2)
-        x = nn.utils.rnn.pack_padded_sequence(x, in_lens, batch_first=True)
+        x = nn.utils.rnn.pack_padded_sequence(x, in_lens.cpu(), batch_first=True)
 
         self.lstm.flatten_parameters()
         outputs, _ = self.lstm(x)
@@ -358,19 +384,42 @@ class Attention(torch.nn.Module):
         self.v = LinearNorm(n_att_channels, 1, bias=False, w_init_gain='tanh')
         self.score_mask_value = -float("inf")
 
-    def forward(self, queries, keys, values, mask=None, attn=None):
+    def compute_attention_posterior(self, attn, attn_prior, mask=None,
+                                    eps=1e-20):
+        attn_prior = torch.log(attn_prior.float() + eps)
+        attn = torch.log(attn.float() + eps)
+        attn_posterior = attn + attn_prior
+
+        if mask is not None:
+            attn_posterior.data.masked_fill_(
+                mask.transpose(1, 2), self.score_mask_value)
+
+        attn_posterior = self.softmax(attn_posterior)
+        return attn_posterior
+
+    def forward(self, queries, keys, values, mask=None, attn=None,
+                attn_prior=None):
+        """
+        returns:
+            attention weights batch x mel_seq_len x text_seq_len
+            attention_context batch x featdim x mel_seq_len
+            sums to 1 over text_seq_len(keys)
+        """
         if attn is None:
             keys = self.key(keys).transpose(0, 1)
             values = self.value(values) if hasattr(self, 'value') else values
             values = values.transpose(0, 1)
             queries = self.query(queries).transpose(0, 1)
-
             attn = self.v(torch.tanh((queries[:, :, None] + keys[:, None])))
             attn = attn[..., 0] / self.temperature
             if mask is not None:
                 attn.data.masked_fill_(mask.transpose(1, 2),
                                        self.score_mask_value)
             attn = self.softmax(attn)
+
+            if attn_prior is not None:
+                attn = self.compute_attention_posterior(attn, attn_prior, mask)
+
         else:
             values = self.value(values)
             values = values.transpose(0, 1)
@@ -383,29 +432,39 @@ class Attention(torch.nn.Module):
 class AR_Back_Step(torch.nn.Module):
     def __init__(self, n_mel_channels, n_speaker_dim, n_text_dim,
                  n_in_channels, n_hidden, n_attn_channels, n_lstm_layers,
-                 add_gate):
+                 add_gate, use_cumm_attention):
         super(AR_Back_Step, self).__init__()
         self.ar_step = AR_Step(n_mel_channels, n_speaker_dim, n_text_dim,
                                n_mel_channels+n_speaker_dim, n_hidden,
-                               n_attn_channels, n_lstm_layers, add_gate)
+                               n_attn_channels, n_lstm_layers, add_gate,
+                               use_cumm_attention)
 
-    def forward(self, mel, text, mask, out_lens):
+    def forward(self, mel, text, mask, out_lens, attn_prior=None):
         mel = torch.flip(mel, (0, ))
+        if attn_prior is not None:
+            attn_prior = torch.flip(attn_prior, (1, ))  # (B, M, T)
         # backwards flow, send padded zeros back to end
         for k in range(mel.size(1)):
             mel[:, k] = mel[:, k].roll(out_lens[k].item(), dims=0)
+            if attn_prior is not None:
+                attn_prior[k] = attn_prior[k].roll(out_lens[k].item(), dims=0)
 
-        mel, log_s, gates, attn = self.ar_step(mel, text, mask, out_lens)
+        mel, log_s, gates, attn = self.ar_step(
+            mel, text, mask, out_lens, attn_prior)
 
         # move padded zeros back to beginning
         for k in range(mel.size(1)):
             mel[:, k] = mel[:, k].roll(-out_lens[k].item(), dims=0)
+            if attn_prior is not None:
+                attn_prior[k] = attn_prior[k].roll(-out_lens[k].item(), dims=0)
 
+        if attn_prior is not None:
+            attn_prior = torch.flip(attn_prior, (1, ))
         return torch.flip(mel, (0, )), log_s, gates, attn
 
-    def infer(self, residual, text):
+    def infer(self, residual, text, attns):
         residual, attention_weights = self.ar_step.infer(
-            torch.flip(residual, (0, )), text)
+            torch.flip(residual, (0, )), text, attns)
         residual = torch.flip(residual, (0, ))
         return residual, attention_weights
 
@@ -413,15 +472,21 @@ class AR_Back_Step(torch.nn.Module):
 class AR_Step(torch.nn.Module):
     def __init__(self, n_mel_channels, n_speaker_dim, n_text_channels,
                  n_in_channels, n_hidden, n_attn_channels, n_lstm_layers,
-                 add_gate):
+                 add_gate, use_cumm_attention):
         super(AR_Step, self).__init__()
+        self.use_cumm_attention = use_cumm_attention
         self.conv = torch.nn.Conv1d(n_hidden, 2*n_mel_channels, 1)
         self.conv.weight.data = 0.0*self.conv.weight.data
         self.conv.bias.data = 0.0*self.conv.bias.data
         self.lstm = torch.nn.LSTM(n_hidden+n_attn_channels, n_hidden, n_lstm_layers)
         self.attention_lstm = torch.nn.LSTM(n_mel_channels, n_hidden)
         self.attention_layer = Attention(n_hidden, n_speaker_dim,
-                                         n_text_channels, n_attn_channels,)
+                                         n_text_channels, n_attn_channels)
+        if self.use_cumm_attention:
+            self.attn_cond_layer = AttentionConditioningLayer(
+                input_dim=2, attention_n_filters=32,
+                attention_kernel_sizes=[5, 3],
+                attention_dim=n_text_channels + n_speaker_dim)
         self.dense_layer = DenseLayer(in_dim=n_hidden,
                                       sizes=[n_hidden, n_hidden])
         if add_gate:
@@ -448,14 +513,35 @@ class AR_Step(torch.nn.Module):
         # sort the data by decreasing length using provided index
         # we assume batch index is in dim=1
         padded_data = padded_data[:, sorted_idx]
-        padded_data = nn.utils.rnn.pack_padded_sequence(padded_data, lens)
+        padded_data = nn.utils.rnn.pack_padded_sequence(padded_data, lens.cpu())
         hidden_vectors = recurrent_model(padded_data)[0]
         hidden_vectors, _ = nn.utils.rnn.pad_packed_sequence(hidden_vectors)
         # unsort the results at dim=1 and return
         hidden_vectors = hidden_vectors[:, unsort_idx]
         return hidden_vectors
 
-    def forward(self, mel, text, mask, out_lens):
+    def run_cumm_attn_sequence(self, attn_lstm_outputs, text, mask,
+                               attn_prior=None):
+        seq_len, bsize, text_feat_dim = text.shape
+        attention_context_all = [] # strangely, appending to a list is faster than pre-allocation
+        attention_weights_all = []
+        attn_cumm_tensor = text[:, :, 0:1].permute(1, 2, 0)*0
+        attention_weights = attn_cumm_tensor*0
+        for i in range(attn_lstm_outputs.shape[0]):
+            attn_cat = torch.cat((attn_cumm_tensor, attention_weights), 1)
+            attn_cond_vector = self.attn_cond_layer(attn_cat).permute(2, 0, 1)
+            output = attn_lstm_outputs[i:i+1:, :]
+            attention_context, attention_weights = self.attention_layer(
+                output, text*attn_cond_vector, text, mask=mask,
+                attn_prior=attn_prior)
+            attention_context_all += [attention_context]
+            attention_weights_all += [attention_weights]
+            attn_cumm_tensor = attn_cumm_tensor + attention_weights
+        attention_context_all = torch.cat(attention_context_all, 2)
+        attention_weights_all = torch.cat(attention_weights_all, 1)
+        return {'attention_context': attention_context_all, 'attention_weights': attention_weights_all}
+
+    def forward(self, mel, text, mask, out_lens, attn_prior=None):
         dummy = torch.FloatTensor(1, mel.size(1), mel.size(2)).zero_()
         dummy = dummy.type(mel.type())
         # seq_len x batch x dim
@@ -471,11 +557,13 @@ class AR_Step(torch.nn.Module):
                 ids, original_ids, lens, mel0, self.attention_lstm)
         else:
             attention_hidden = self.attention_lstm(mel0)[0]
-
-        # attention weights batch x text_seq_len x mel_seq_len
-        # sums to 1 over text_seq_len
-        attention_context, attention_weights = self.attention_layer(
-            attention_hidden, text, text, mask=mask)
+        if hasattr(self, 'use_cumm_attention') and self.use_cumm_attention:
+            cumm_attn_output_dict = self.run_cumm_attn_sequence(attention_hidden, text, mask)
+            attention_context = cumm_attn_output_dict['attention_context']
+            attention_weights = cumm_attn_output_dict['attention_weights']
+        else:
+            attention_context, attention_weights = self.attention_layer(
+                attention_hidden, text, text, mask=mask, attn_prior=attn_prior)
 
         attention_context = attention_context.permute(2, 0, 1)
         decoder_input = torch.cat((attention_hidden, attention_context), -1)
@@ -500,18 +588,35 @@ class AR_Step(torch.nn.Module):
         mel = torch.exp(log_s) * mel + b
         return mel, log_s, gates, attention_weights
 
-    def infer(self, residual, text):
+    def infer(self, residual, text, attns, attn_prior=None):
+        attn_cond_vector = 1.0
+        if hasattr(self, 'use_cumm_attention') and self.use_cumm_attention:
+            attn_cumm_tensor = text[:, :, 0:1].permute(1, 2, 0)*0
+            attention_weight = attn_cumm_tensor*0
         attention_weights = []
         total_output = []  # seems 10FPS faster than pre-allocation
+
         output = None
+        attn = None
         dummy = torch.cuda.FloatTensor(1, residual.size(1), residual.size(2)).zero_()
         for i in range(0, residual.size(0)):
             if i == 0:
                 attention_hidden, (h, c) = self.attention_lstm(dummy)
             else:
                 attention_hidden, (h, c) = self.attention_lstm(output, (h, c))
+
+            if hasattr(self, 'use_cumm_attention') and self.use_cumm_attention:
+                attn_cat = torch.cat((attn_cumm_tensor, attention_weight), 1)
+                attn_cond_vector = self.attn_cond_layer(attn_cat).permute(2, 0, 1)
+
+            attn = None if attns is None else attns[i][None, None]
             attention_context, attention_weight = self.attention_layer(
-                attention_hidden, text, text)
+                attention_hidden, text * attn_cond_vector, text, attn=attn,
+                attn_prior=attn_prior)
+
+            if hasattr(self, 'use_cumm_attention') and self.use_cumm_attention:
+                attn_cumm_tensor = attn_cumm_tensor + attention_weight
+
             attention_weights.append(attention_weight)
             attention_context = attention_context.permute(2, 0, 1)
             decoder_input = torch.cat((attention_hidden, attention_context), -1)
@@ -528,7 +633,6 @@ class AR_Step(torch.nn.Module):
             total_output.append(output)
             if hasattr(self, 'gate_layer') and torch.sigmoid(self.gate_layer(decoder_input)) > self.gate_threshold:
                 break
-
         total_output = torch.cat(total_output, 0)
         return total_output, attention_weights
 
@@ -537,7 +641,8 @@ class Flowtron(torch.nn.Module):
     def __init__(self, n_speakers, n_speaker_dim, n_text, n_text_dim, n_flows,
                  n_mel_channels, n_hidden, n_attn_channels, n_lstm_layers,
                  use_gate_layer, mel_encoder_n_hidden, n_components,
-                 fixed_gaussian, mean_scale, dummy_speaker_embedding):
+                 fixed_gaussian, mean_scale, dummy_speaker_embedding,
+                 use_cumm_attention):
 
         super(Flowtron, self).__init__()
         norm_fn = nn.InstanceNorm1d
@@ -561,17 +666,20 @@ class Flowtron(torch.nn.Module):
                                           n_text_dim,
                                           n_mel_channels+n_speaker_dim,
                                           n_hidden, n_attn_channels,
-                                          n_lstm_layers, add_gate))
+                                          n_lstm_layers, add_gate,
+                                          use_cumm_attention))
             else:
                 self.flows.append(AR_Back_Step(n_mel_channels, n_speaker_dim,
                                                n_text_dim,
                                                n_mel_channels+n_speaker_dim,
                                                n_hidden, n_attn_channels,
-                                               n_lstm_layers, add_gate))
+                                               n_lstm_layers, add_gate,
+                                               use_cumm_attention))
 
-    def forward(self, mel, speaker_vecs, text, in_lens, out_lens):
-        speaker_vecs = speaker_vecs*0 if self.dummy_speaker_embedding else speaker_vecs
-        speaker_vecs = self.speaker_embedding(speaker_vecs)
+    def forward(self, mel, speaker_ids, text, in_lens, out_lens,
+                attn_prior=None):
+        speaker_ids = speaker_ids*0 if self.dummy_speaker_embedding else speaker_ids
+        speaker_vecs = self.speaker_embedding(speaker_ids)
         text = self.embedding(text).transpose(1, 2)
         text = self.encoder(text, in_lens)
 
@@ -591,28 +699,39 @@ class Flowtron(torch.nn.Module):
         mask = ~get_mask_from_lengths(in_lens)[..., None]
         for i, flow in enumerate(self.flows):
             mel, log_s, gate, attn = flow(
-                mel, encoder_outputs, mask, out_lens)
+                mel, encoder_outputs, mask, out_lens, attn_prior)
             log_s_list.append(log_s)
             attns_list.append(attn)
-        return mel, log_s_list, gate, attns_list,  mean, log_var, prob
+        return mel, log_s_list, gate, attns_list, mean, log_var, prob
 
-    def infer(self, residual, speaker_vecs, text, temperature=1.0,
-              gate_threshold=0.5):
-        speaker_vecs = speaker_vecs*0 if self.dummy_speaker_embedding else speaker_vecs
-        speaker_vecs = self.speaker_embedding(speaker_vecs)
+    def infer(self, residual, speaker_ids, text, temperature=1.0,
+              gate_threshold=0.5, attns=None, attn_prior=None):
+        """Inference function. Inverse of the forward pass
+
+        Args:
+            residual: 1 x 80 x N_residual tensor of sampled z values
+            speaker_ids: 1 x 1 tensor of integral speaker ids (should be a single value)
+            text (torch.int64): 1 x N_text tensor holding text-token ids
+
+        Returns:
+            residual: input residual after flow transformation. Technically the mel spectrogram values
+            attention_weights: attention weights predicted by each flow step for mel-text alignment
+        """
+
+        speaker_ids = speaker_ids*0 if self.dummy_speaker_embedding else speaker_ids
+        speaker_vecs = self.speaker_embedding(speaker_ids)
         text = self.embedding(text).transpose(1, 2)
         text = self.encoder.infer(text)
         text = text.transpose(0, 1)
         encoder_outputs = torch.cat(
             [text, speaker_vecs.expand(text.size(0), -1, -1)], 2)
         residual = residual.permute(2, 0, 1)
-
         attention_weights = []
         for i, flow in enumerate(reversed(self.flows)):
+            attn = None if attns is None else reversed(attns)[i]
             self.set_temperature_and_gate(flow, temperature, gate_threshold)
-            residual, attention_weight = flow.infer(residual, encoder_outputs)
+            residual, attention_weight = flow.infer(residual, encoder_outputs, attn)
             attention_weights.append(attention_weight)
-
         return residual.permute(1, 2, 0), attention_weights
 
     @staticmethod

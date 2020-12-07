@@ -6,7 +6,7 @@
 
 In our recent [paper] we propose Flowtron: an autoregressive flow-based
 generative network for text-to-speech synthesis with control over speech
-variation and style transfer. Flowtron borrows insights from [IAF] and revamps
+variation and style transfer. Flowtron borrows insights from Autoregressive Flows and revamps
 [Tacotron] in order to provide high-quality and expressive mel-spectrogram
 synthesis. Flowtron is optimized by maximizing the likelihood of the training
 data, which makes training simple and stable. Flowtron learns an invertible
@@ -32,17 +32,28 @@ Visit our [website] for audio samples.
 5. Install python requirements or build docker image
     - Install python requirements: `pip install -r requirements.txt`
 
-## Training
+## Training from scratch
 1. Update the filelists inside the filelists folder to point to your data
-2. `python train.py -c config.json -p train_config.output_directory=outdir`
-3. (OPTIONAL) `tensorboard --logdir=outdir/logdir`
+2. Train using the attention prior until attention looks good
+    `python train.py -c config.json -p train_config.output_directory=outdir data_config.use_attn_prior=1`
+3. Resume training without the attention prior
+    `python train.py -c config.json -p train_config.output_directory=outdir data_config.use_attn_prior=0` 
+`train_config.checkpoint_path=model_niters `
+4. (OPTIONAL) If the gate layer is overfitting once done training, train just the gate layer from scratch
+    `python train.py -c config.json -p train_config.output_directory=outdir` `train_config.checkpoint_path=model_niters data_config.use_attn_prior=0`
+`train_config.ignore_layers='["flows.1.ar_step.gate_layer.linear_layer.weight","flows.1.ar_step.gate_layer.linear_layer.bias"]'` `train_config.finetune_layers='["flows.1.ar_step.gate_layer.linear_layer.weight","flows.1.ar_step.gate_layer.linear_layer.bias"]'`
+5. (OPTIONAL) `tensorboard --logdir=outdir/logdir`
 
 ## Training using a pre-trained model
 Training using a pre-trained model can lead to faster convergence.
 Dataset dependent layers can be [ignored]
 
-1. Download our published [Flowtron LJS] or [Flowtron LibriTTS] model
+1. Download our published [Flowtron LJS], [Flowtron LibriTTS] or [Flowtron LibriTTS2K] model
 2. `python train.py -c config.json -p train_config.ignore_layers=["speaker_embedding.weight"] train_config.checkpoint_path="models/flowtron_ljs.pt"`
+
+## Fine-tuning for few-shot speech synthesis
+1. Download our published [Flowtron LibriTTS2K] model
+2. `python train.py -c config.json -p train_config.finetune_layers=["speaker_embedding.weight"] train_config.checkpoint_path="models/flowtron_libritts2k.pt"`
 
 ## Multi-GPU (distributed) and Automatic Mixed Precision Training ([AMP])
 1. `python -m torch.distributed.launch --use_env --nproc_per_node=NUM_GPUS_YOU_HAVE train.py -c config.json -p train_config.output_directory=outdir train_config.fp16=true`
@@ -59,11 +70,11 @@ This implementation uses code from the following repos: [Keith
 Ito](https://github.com/keithito/tacotron/), [Prem
 Seetharaman](https://github.com/pseeth/pytorch-stft) as described in our code.
 
-[IAF]: https://arxiv.org/abs/1606.04934
 [ignored]: https://github.com/NVIDIA/flowtron/config.json#L12
 [paper]: https://arxiv.org/abs/2005.05957
 [Flowtron LJS]: https://drive.google.com/open?id=1Cjd6dK_eFz6DE0PKXKgKxrzTUqzzUDW-
 [Flowtron LibriTTS]: https://drive.google.com/open?id=1KhJcPawFgmfvwV7tQAOeC253rYstLrs8
+[Flowtron LibriTTS2K]: https://drive.google.com/open?id=1sKTImKkU0Cmlhjc_OeUDLrOLIXvUPwnO
 [WaveGlow]: https://drive.google.com/open?id=1rpK8CzAAirq9sWZhe9nlfvxMF1dRgFbF
 [PyTorch]: https://github.com/pytorch/pytorch#installation
 [website]: https://nv-adlr.github.io/Flowtron
