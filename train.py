@@ -29,10 +29,8 @@ from flowtron_logger import FlowtronLogger
 from radam import RAdam
 
 
-# =====START: ADDED FOR DISTRIBUTED======
 from distributed import init_distributed, apply_gradient_allreduce, reduce_tensor
 from torch.utils.data.distributed import DistributedSampler
-# =====END:   ADDED FOR DISTRIBUTED======
 
 
 def update_params(config, params):
