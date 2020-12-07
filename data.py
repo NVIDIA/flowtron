@@ -16,7 +16,6 @@
 ###############################################################################
 import re
 import os
-import sys
 import argparse
 import json
 import random
@@ -24,13 +23,29 @@ import numpy as np
 import torch
 import torch.utils.data
 from scipy.io.wavfile import read
+from scipy.stats import betabinom
 from audio_processing import TacotronSTFT
 from text import text_to_sequence, cmudict, _clean_text, get_arpabet
 
 
-def load_filepaths_and_text(filename, split="|"):
-    with open(filename, encoding='utf-8') as f:
-        filepaths_and_text = [line.strip().split(split) for line in f]
+def beta_binomial_prior_distribution(phoneme_count, mel_count):
+    P, M = phoneme_count, mel_count
+    x = np.arange(0, P)
+    mel_text_probs = []
+    for i in range(1, M+1):
+        a, b = i, M+1-i
+        rv = betabinom(P, a, b)
+        mel_i_prob = rv.pmf(x)
+        mel_text_probs.append(mel_i_prob)
+    return torch.tensor(np.array(mel_text_probs))
+
+
+def load_filepaths_and_text(filelist, split="|"):
+    if isinstance(filelist, str):
+        with open(filelist, encoding='utf-8') as f:
+            filepaths_and_text = [line.strip().split(split) for line in f]
+    else:
+        filepaths_and_text = filelist
     return filepaths_and_text
 
 
@@ -43,10 +58,19 @@ def load_wav_to_torch(full_path):
 class Data(torch.utils.data.Dataset):
     def __init__(self, filelist_path, filter_length, hop_length, win_length,
                  sampling_rate, mel_fmin, mel_fmax, max_wav_value, p_arpabet,
-                 cmudict_path, text_cleaners, speaker_ids=None, randomize=True,
-                 seed=1234):
+                 cmudict_path, text_cleaners, speaker_ids=None,
+                 use_attn_prior=False, attn_prior_threshold=1e-4,
+                 randomize=True, seed=1234):
         self.max_wav_value = max_wav_value
         self.audiopaths_and_text = load_filepaths_and_text(filelist_path)
+        self.use_attn_prior = use_attn_prior
+        self.attn_prior_threshold = attn_prior_threshold
+
+        if speaker_ids is None or speaker_ids == '':
+            self.speaker_ids = self.create_speaker_lookup_table(self.audiopaths_and_text)
+        else:
+            self.speaker_ids = speaker_ids
+
         self.stft = TacotronSTFT(filter_length=filter_length,
                                  hop_length=hop_length,
                                  win_length=win_length,
@@ -64,6 +88,15 @@ class Data(torch.utils.data.Dataset):
         random.seed(seed)
         if randomize:
             random.shuffle(self.audiopaths_and_text)
+
+    def compute_attention_prior(self, audiopath, mel_length, text_length):
+        attn_prior = beta_binomial_prior_distribution(text_length, mel_length)
+
+        if self.attn_prior_threshold > 0:
+            attn_prior = attn_prior.masked_fill(
+                attn_prior < self.attn_prior_threshold, 0.0)
+
+        return attn_prior
 
     def create_speaker_lookup_table(self, audiopaths_and_text):
         speaker_ids = np.sort(np.unique([x[2] for x in audiopaths_and_text]))
@@ -102,7 +135,12 @@ class Data(torch.utils.data.Dataset):
         mel = self.get_mel(audio)
         text_encoded = self.get_text(text)
         speaker_id = self.get_speaker_id(speaker_id)
-        return (mel, speaker_id, text_encoded)
+        attn_prior = None
+        if self.use_attn_prior:
+            attn_prior = self.compute_attention_prior(
+                audiopath, mel.shape[1], text_encoded.shape[0])
+
+        return (mel, speaker_id, text_encoded, attn_prior)
 
     def __len__(self):
         return len(self.audiopaths_and_text)
@@ -110,8 +148,9 @@ class Data(torch.utils.data.Dataset):
 
 class DataCollate():
     """ Zero-pads model inputs and targets based on number of frames per step """
-    def __init__(self, n_frames_per_step=1):
+    def __init__(self, n_frames_per_step=1, use_attn_prior=False):
         self.n_frames_per_step = n_frames_per_step
+        self.use_attn_prior = use_attn_prior
 
     def __call__(self, batch):
         """Collate's training batch from normalized text and mel-spectrogram """
@@ -119,7 +158,7 @@ class DataCollate():
         input_lengths, ids_sorted_decreasing = torch.sort(
             torch.LongTensor([len(x[2]) for x in batch]),
             dim=0, descending=True)
-        max_input_len = input_lengths[0]
+        max_input_len = input_lengths[0].item()
 
         text_padded = torch.LongTensor(len(batch), max_input_len)
         text_padded.zero_()
@@ -140,6 +179,11 @@ class DataCollate():
         gate_padded = torch.FloatTensor(len(batch), max_target_len)
         gate_padded.zero_()
         output_lengths = torch.LongTensor(len(batch))
+
+        attn_prior_padded = None
+        if self.use_attn_prior:
+            attn_prior_padded = torch.FloatTensor(len(batch), max_target_len, max_input_len)
+            attn_prior_padded.zero_()
         speaker_ids = torch.LongTensor(len(batch))
         for i in range(len(ids_sorted_decreasing)):
             mel = batch[ids_sorted_decreasing[i]][0]
@@ -147,8 +191,11 @@ class DataCollate():
             gate_padded[i, mel.size(1)-1:] = 1
             output_lengths[i] = mel.size(1)
             speaker_ids[i] = batch[ids_sorted_decreasing[i]][1]
+            if self.use_attn_prior:
+                cur_attn_prior = batch[ids_sorted_decreasing[i]][3]
+                attn_prior_padded[i, :cur_attn_prior.size(0), :cur_attn_prior.size(1)] = cur_attn_prior
 
-        return mel_padded, speaker_ids, text_padded, input_lengths, output_lengths, gate_padded
+        return mel_padded, speaker_ids, text_padded, input_lengths, output_lengths, gate_padded, attn_prior_padded
 
 
 # ===================================================================
