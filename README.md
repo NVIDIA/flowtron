@@ -68,7 +68,7 @@ Generative Network for Speech Synthesis
 ## Acknowledgements
 This implementation uses code from the following repos: [Keith
 Ito](https://github.com/keithito/tacotron/), [Prem
-Seetharaman](https://github.com/pseeth/pytorch-stft) as described in our code.
+Seetharaman](https://github.com/pseeth/pytorch-stft) and [Liyuan Liu](https://github.com/LiyuanLucasLiu/RAdam) as described in our code.
 
 [ignored]: https://github.com/NVIDIA/flowtron/config.json#L12
 [paper]: https://arxiv.org/abs/2005.05957
