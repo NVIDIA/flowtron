@@ -385,7 +385,7 @@ class Attention(torch.nn.Module):
         self.score_mask_value = -float("inf")
 
     def compute_attention_posterior(self, attn, attn_prior, mask=None,
-                                    eps=1e-20):
+                                    eps=1e-8):
         attn_prior = torch.log(attn_prior.float() + eps)
         attn = torch.log(attn.float() + eps)
         attn_posterior = attn + attn_prior
