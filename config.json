@@ -32,7 +32,8 @@
         "mel_fmax": 8000.0,
         "max_wav_value": 32768.0,
         "use_attn_prior": false,
-        "attn_prior_threshold": 1e-4
+        "attn_prior_threshold": 1e-4,
+        "keep_ambiguous": false
     },
     "dist_config": {
         "dist_backend": "nccl",
