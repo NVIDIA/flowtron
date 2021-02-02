@@ -60,11 +60,12 @@ class Data(torch.utils.data.Dataset):
                  sampling_rate, mel_fmin, mel_fmax, max_wav_value, p_arpabet,
                  cmudict_path, text_cleaners, speaker_ids=None,
                  use_attn_prior=False, attn_prior_threshold=1e-4,
-                 randomize=True, seed=1234):
+                 randomize=True, keep_ambiguous=False, seed=1234):
         self.max_wav_value = max_wav_value
         self.audiopaths_and_text = load_filepaths_and_text(filelist_path)
         self.use_attn_prior = use_attn_prior
         self.attn_prior_threshold = attn_prior_threshold
+        self.keep_ambiguous=keep_ambiguous
 
         if speaker_ids is None or speaker_ids == '':
             self.speaker_ids = self.create_speaker_lookup_table(self.audiopaths_and_text)
@@ -79,7 +80,7 @@ class Data(torch.utils.data.Dataset):
         self.sampling_rate = sampling_rate
         self.text_cleaners = text_cleaners
         self.p_arpabet = p_arpabet
-        self.cmudict = cmudict.CMUDict(cmudict_path, keep_ambiguous=True)
+        self.cmudict = cmudict.CMUDict(cmudict_path, keep_ambiguous=keep_ambiguous)
         if speaker_ids is None:
             self.speaker_ids = self.create_speaker_lookup_table(self.audiopaths_and_text)
         else:
