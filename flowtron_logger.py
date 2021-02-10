@@ -16,8 +16,9 @@
 ###############################################################################
 import random
 import torch
-from tensorboardX import SummaryWriter
-from flowtron_plotting_utils import plot_alignment_to_numpy, plot_gate_outputs_to_numpy
+from torch.utils.tensorboard import SummaryWriter
+from flowtron_plotting_utils import plot_alignment_to_numpy
+from flowtron_plotting_utils import plot_gate_outputs_to_numpy
 
 
 class FlowtronLogger(SummaryWriter):
@@ -25,14 +26,14 @@ class FlowtronLogger(SummaryWriter):
         super(FlowtronLogger, self).__init__(logdir)
 
     def log_training(self, loss, learning_rate, iteration):
-            self.add_scalar("training.loss", loss, iteration)
-            self.add_scalar("learning.rate", learning_rate, iteration)
+            self.add_scalar("training/loss", loss, iteration)
+            self.add_scalar("learning_rate", learning_rate, iteration)
 
     def log_validation(self, loss, loss_nll, loss_gate, attns, gate_pred,
                        gate_out, iteration):
-        self.add_scalar("validation_loss", loss, iteration)
-        self.add_scalar("validation_loss_nll", loss_nll, iteration)
-        self.add_scalar("validation_loss_gate", loss_gate, iteration)
+        self.add_scalar("validation/loss", loss, iteration)
+        self.add_scalar("validation/loss_nll", loss_nll, iteration)
+        self.add_scalar("validation/loss_gate", loss_gate, iteration)
 
         idx = random.randint(0, len(gate_out) - 1)
         for i in range(len(attns)):
