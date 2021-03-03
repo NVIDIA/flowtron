@@ -145,7 +145,7 @@ def compute_validation_loss(model, criterion, valset, collate_fn, batch_size,
                                 pin_memory=False, collate_fn=collate_fn)
 
         val_loss, val_loss_nll, val_loss_gate = 0.0, 0.0, 0.0
-        for i, batch in enumerate(val_loader):
+        for batch in val_loader:
             mel, speaker_vecs, text, in_lens, out_lens, gate_target, attn_prior = batch
             mel, speaker_vecs, text = mel.cuda(), speaker_vecs.cuda(), text.cuda()
             in_lens, out_lens, gate_target = in_lens.cuda(), out_lens.cuda(), gate_target.cuda()
@@ -166,12 +166,9 @@ def compute_validation_loss(model, criterion, valset, collate_fn, batch_size,
                 reduced_val_loss = loss.item()
                 reduced_val_loss_nll = loss_nll.item()
                 reduced_val_loss_gate = loss_gate.item()
-            val_loss += reduced_val_loss
-            val_loss_nll += reduced_val_loss_nll
-            val_loss_gate += reduced_val_loss_gate
-        val_loss = val_loss / (i + 1)
-        val_loss_nll = val_loss_nll / (i + 1)
-        val_loss_gate = val_loss_gate / (i + 1)
+            val_loss += reduced_val_loss / len(val_loader)
+            val_loss_nll += reduced_val_loss_nll / len(val_loader)
+            val_loss_gate += reduced_val_loss_gate / len(val_loader)
 
     print("Mean {}\nLogVar {}\nProb {}".format(mean, log_var, prob))
     model.train()
