@@ -239,7 +239,7 @@ class MelEncoder(nn.Module):
         # sort the data by decreasing length using provided index
         # we assume batch index is in dim=1
         padded_data = padded_data[:, sorted_idx]
-        padded_data = nn.utils.rnn.pack_padded_sequence(padded_data, lens)
+        padded_data = nn.utils.rnn.pack_padded_sequence(padded_data, lens.cpu())
         hidden_vectors = recurrent_model(padded_data)[0]
         hidden_vectors, _ = nn.utils.rnn.pad_packed_sequence(hidden_vectors)
         # unsort the results at dim=1 and return
