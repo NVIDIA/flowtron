@@ -28,12 +28,13 @@ from audio_processing import TacotronSTFT
 from text import text_to_sequence, cmudict, _clean_text, get_arpabet
 
 
-def beta_binomial_prior_distribution(phoneme_count, mel_count):
+def beta_binomial_prior_distribution(phoneme_count, mel_count,
+                                     scaling_factor=1.0):
     P, M = phoneme_count, mel_count
     x = np.arange(0, P)
     mel_text_probs = []
     for i in range(1, M+1):
-        a, b = i, M+1-i
+        a, b = scaling_factor*i, scaling_factor*(M+1-i)
         rv = betabinom(P, a, b)
         mel_i_prob = rv.pmf(x)
         mel_text_probs.append(mel_i_prob)
@@ -60,15 +61,18 @@ class Data(torch.utils.data.Dataset):
                  sampling_rate, mel_fmin, mel_fmax, max_wav_value, p_arpabet,
                  cmudict_path, text_cleaners, speaker_ids=None,
                  use_attn_prior=False, attn_prior_threshold=1e-4,
-                 randomize=True, keep_ambiguous=False, seed=1234):
+                 prior_cache_path="", betab_scaling_factor=1.0, randomize=True,
+                 keep_ambiguous=False, seed=1234):
         self.max_wav_value = max_wav_value
         self.audiopaths_and_text = load_filepaths_and_text(filelist_path)
         self.use_attn_prior = use_attn_prior
+        self.betab_scaling_factor = betab_scaling_factor
         self.attn_prior_threshold = attn_prior_threshold
-        self.keep_ambiguous=keep_ambiguous
+        self.keep_ambiguous = keep_ambiguous
 
         if speaker_ids is None or speaker_ids == '':
-            self.speaker_ids = self.create_speaker_lookup_table(self.audiopaths_and_text)
+            self.speaker_ids = self.create_speaker_lookup_table(
+                self.audiopaths_and_text)
         else:
             self.speaker_ids = speaker_ids
 
@@ -80,18 +84,55 @@ class Data(torch.utils.data.Dataset):
         self.sampling_rate = sampling_rate
         self.text_cleaners = text_cleaners
         self.p_arpabet = p_arpabet
-        self.cmudict = cmudict.CMUDict(cmudict_path, keep_ambiguous=keep_ambiguous)
+        self.cmudict = cmudict.CMUDict(
+            cmudict_path, keep_ambiguous=keep_ambiguous)
         if speaker_ids is None:
-            self.speaker_ids = self.create_speaker_lookup_table(self.audiopaths_and_text)
+            self.speaker_ids = self.create_speaker_lookup_table(
+                self.audiopaths_and_text)
         else:
             self.speaker_ids = speaker_ids
+
+        # caching makes sense for p_phoneme=1.0
+        # for other values, everytime text lengths will change
+        self.prior_cache_path = prior_cache_path
+        self.caching_enabled = False
+        if (self.prior_cache_path is not None and
+                self.prior_cache_path != "" and p_arpabet == 1.0):
+            self.caching_enabled = True
+        # make sure caching path exists
+        if (self.caching_enabled and
+                not os.path.exists(self.prior_cache_path)):
+            os.makedirs(self.prior_cache_path)
 
         random.seed(seed)
         if randomize:
             random.shuffle(self.audiopaths_and_text)
 
     def compute_attention_prior(self, audiopath, mel_length, text_length):
-        attn_prior = beta_binomial_prior_distribution(text_length, mel_length)
+        folder_path = audiopath.split('/')[-2]
+        filename = os.path.basename(audiopath).split('.')[0]
+        prior_path = os.path.join(
+            self.prior_cache_path,
+            folder_path + "_" + filename)
+
+        prior_path += "_prior.pth"
+
+        prior_loaded = False
+        if self.caching_enabled and os.path.exists(prior_path):
+            attn_prior = torch.load(prior_path)
+            if (attn_prior.shape[1] == text_length and
+                    attn_prior.shape[0] == mel_length):
+                prior_loaded = True
+            else:
+                print("Prior size mismatch, recomputing")
+
+        if not prior_loaded:
+            attn_prior = beta_binomial_prior_distribution(
+                                            text_length,
+                                            mel_length,
+                                            self.betab_scaling_factor)
+            if self.caching_enabled:
+                torch.save(attn_prior, prior_path)
 
         if self.attn_prior_threshold > 0:
             attn_prior = attn_prior.masked_fill(
@@ -175,7 +216,8 @@ class DataCollate():
             assert max_target_len % self.n_frames_per_step == 0
 
         # include mel padded, gate padded and speaker ids
-        mel_padded = torch.FloatTensor(len(batch), num_mel_channels, max_target_len)
+        mel_padded = torch.FloatTensor(
+                len(batch), num_mel_channels, max_target_len)
         mel_padded.zero_()
         gate_padded = torch.FloatTensor(len(batch), max_target_len)
         gate_padded.zero_()
@@ -183,7 +225,8 @@ class DataCollate():
 
         attn_prior_padded = None
         if self.use_attn_prior:
-            attn_prior_padded = torch.FloatTensor(len(batch), max_target_len, max_input_len)
+            attn_prior_padded = torch.FloatTensor(
+                len(batch), max_target_len, max_input_len)
             attn_prior_padded.zero_()
         speaker_ids = torch.LongTensor(len(batch))
         for i in range(len(ids_sorted_decreasing)):
@@ -194,9 +237,13 @@ class DataCollate():
             speaker_ids[i] = batch[ids_sorted_decreasing[i]][1]
             if self.use_attn_prior:
                 cur_attn_prior = batch[ids_sorted_decreasing[i]][3]
-                attn_prior_padded[i, :cur_attn_prior.size(0), :cur_attn_prior.size(1)] = cur_attn_prior
+                attn_prior_padded[
+                    i,
+                    :cur_attn_prior.size(0),
+                    :cur_attn_prior.size(1)] = cur_attn_prior
 
-        return mel_padded, speaker_ids, text_padded, input_lengths, output_lengths, gate_padded, attn_prior_padded
+        return (mel_padded, speaker_ids, text_padded, input_lengths,
+                output_lengths, gate_padded, attn_prior_padded)
 
 
 # ===================================================================
