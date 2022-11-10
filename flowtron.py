@@ -14,9 +14,11 @@
 #  limitations under the License.
 #
 ###############################################################################
+from typing import Optional
+
 import numpy as np
 import torch
-from torch import nn
+from torch import nn, Tensor
 from torch.nn import functional as F
 
 
@@ -46,6 +48,82 @@ def get_mask_from_lengths(lengths):
     ids = torch.arange(0, max_len, out=torch.cuda.LongTensor(max_len))
     mask = (ids < lengths.unsqueeze(1)).bool()
     return mask
+
+
+def masked_instance_norm(input: Tensor, mask: Tensor, running_mean: Optional[Tensor], running_var: Optional[Tensor],
+                         weight: Optional[Tensor], bias: Optional[Tensor], use_input_stats: bool,
+                         momentum: float, eps: float = 1e-5) -> Tensor:
+    r"""Applies Masked Instance Normalization for each channel in each data sample in a batch.
+
+    See :class:`~MaskedInstanceNorm1d` for details.
+    """
+    if not use_input_stats and (running_mean is None or running_var is None):
+        raise ValueError('Expected running_mean and running_var to be not None when use_input_stats=False')
+
+    shape = input.shape
+    b, c = shape[:2]
+
+    num_dims = len(shape[2:])
+    _dims = tuple(range(-num_dims, 0))
+    _slice = (...,) + (None,) * num_dims
+
+    running_mean_ = running_mean[None, :].repeat(b, 1) if running_mean is not None else None
+    running_var_ = running_var[None, :].repeat(b, 1) if running_mean is not None else None
+
+    if use_input_stats:
+        lengths = mask.sum(_dims)
+        mean = (input * mask).sum(_dims) / lengths  # (N, C)
+        var = (((input - mean[_slice]) * mask) ** 2).sum(_dims) / lengths  # (N, C)
+
+        if running_mean is not None:
+            running_mean_.mul_(1 - momentum).add_(momentum * mean.detach())
+            running_mean.copy_(running_mean_.view(b, c).mean(0, keepdim=False))
+        if running_var is not None:
+            running_var_.mul_(1 - momentum).add_(momentum * var.detach())
+            running_var.copy_(running_var_.view(b, c).mean(0, keepdim=False))
+    else:
+        mean, var = running_mean_.view(b, c), running_var_.view(b, c)
+
+    out = (input - mean[_slice]) / torch.sqrt(var[_slice] + eps)  # (N, C, ...)
+
+    if weight is not None and bias is not None:
+        out = out * weight[None, :][_slice] + bias[None, :][_slice]
+
+    return out
+
+
+class MaskedInstanceNorm1d(nn.InstanceNorm1d):
+    r"""Applies Instance Normalization over a masked 3D input
+    (a mini-batch of 1D inputs with additional channel dimension)..
+
+    See documentation of :class:`~torch.nn.InstanceNorm1d` for details.
+
+    Shape:
+        - Input: :math:`(N, C, L)`
+        - Mask: :math:`(N, 1, L)`
+        - Output: :math:`(N, C, L)` (same shape as input)
+    """
+
+    def __init__(self, num_features: int, eps: float = 1e-5, momentum: float = 0.1,
+                 affine: bool = False, track_running_stats: bool = False) -> None:
+        super(MaskedInstanceNorm1d, self).__init__(
+            num_features, eps, momentum, affine, track_running_stats)
+
+    def forward(self, input: Tensor, mask: Tensor = None) -> Tensor:
+        self._check_input_dim(input)
+        if mask is not None:
+            self._check_input_dim(mask)
+
+        if mask is None:
+            return F.instance_norm(
+                input, self.running_mean, self.running_var, self.weight, self.bias,
+                self.training or not self.track_running_stats, self.momentum, self.eps
+            )
+        else:
+            return masked_instance_norm(
+                input, mask, self.running_mean, self.running_var, self.weight, self.bias,
+                self.training or not self.track_running_stats, self.momentum, self.eps
+            )
 
 
 class AttentionConditioningLayer(nn.Module):
@@ -291,7 +369,7 @@ class MelEncoder(nn.Module):
         - Bidirectional LSTM
     """
     def __init__(self, encoder_embedding_dim=512, encoder_kernel_size=3,
-                 encoder_n_convolutions=2, norm_fn=nn.InstanceNorm1d):
+                 encoder_n_convolutions=2, norm_fn=MaskedInstanceNorm1d):
         super(MelEncoder, self).__init__()
 
         convolutions = []
@@ -336,24 +414,14 @@ class MelEncoder(nn.Module):
         return hidden_vectors
 
     def forward(self, x, lens):
-        if x.size()[0] > 1:
-            x_embedded = []
-            # TODO: Speed this up without sacrificing correctness
-            for b_ind in range(x.size()[0]):
-                curr_x = x[b_ind:b_ind+1, :, :lens[b_ind]].clone()
-                for conv in self.convolutions:
-                    curr_x = F.dropout(
-                        F.relu(conv(curr_x)),
-                        0.5,
-                        self.training)
-                x_embedded.append(curr_x[0].transpose(0, 1))
-            x = torch.nn.utils.rnn.pad_sequence(x_embedded, batch_first=True)
-        else:
-            for conv in self.convolutions:
-                x = F.dropout(F.relu(conv(x)), 0.5, self.training)
-            x = x.transpose(1, 2)
-
-        x = x.transpose(0, 1)
+        mask = get_mask_from_lengths(lens).unsqueeze(1) if x.size(0) > 1 else None
+        for conv, norm in self.convolutions:
+            if mask is not None:
+                x.masked_fill_(~mask, 0.)  # zero out padded values before applying convolution
+            x = F.dropout(F.relu(norm(conv(x), mask=mask)), 0.5, self.training)
+        del mask
+        
+        x = x.permute(2, 0, 1)  # (N, C, L) -> (L, N, C)
 
         self.lstm.flatten_parameters()
         if lens is not None:
@@ -427,26 +495,15 @@ class Encoder(nn.Module):
             x (torch.tensor): N x C x L padded input of text embeddings
             in_lens (torch.tensor): 1D tensor of sequence lengths
         """
-        if x.size()[0] > 1:
-            x_embedded = []
-            for b_ind in range(x.size()[0]):  # TODO: improve speed
-                curr_x = x[b_ind:b_ind+1, :, :in_lens[b_ind]].clone()
-                for conv in self.convolutions:
-                    curr_x = F.dropout(
-                        F.relu(conv(curr_x)),
-                        0.5,
-                        self.training)
-                x_embedded.append(curr_x[0].transpose(0, 1))
-            x = torch.nn.utils.rnn.pad_sequence(x_embedded, batch_first=True)
-        else:
-            for conv in self.convolutions:
-                x = F.dropout(
-                    F.relu(conv(x)),
-                    0.5,
-                    self.training)
-            x = x.transpose(1, 2)
-        x = nn.utils.rnn.pack_padded_sequence(
-            x, in_lens.cpu(), batch_first=True)
+        mask = get_mask_from_lengths(in_lens).unsqueeze(1) if x.size(0) > 1 else None
+        for conv, norm in self.convolutions:
+            if mask is not None:
+                x.masked_fill_(~mask, 0.)  # zero out padded values before applying convolution
+            x = F.dropout(F.relu(norm(conv(x), mask=mask)), 0.5, self.training)
+        del mask
+
+        x = x.transpose(1, 2)
+        x = nn.utils.rnn.pack_padded_sequence(x, in_lens.cpu(), batch_first=True)
 
         self.lstm.flatten_parameters()
         outputs, _ = self.lstm(x)
@@ -779,7 +836,7 @@ class Flowtron(torch.nn.Module):
                  use_cumm_attention):
 
         super(Flowtron, self).__init__()
-        norm_fn = nn.InstanceNorm1d
+        norm_fn = MaskedInstanceNorm1d
         self.speaker_embedding = torch.nn.Embedding(n_speakers, n_speaker_dim)
         self.embedding = torch.nn.Embedding(n_text, n_text_dim)
         self.flows = torch.nn.ModuleList()
