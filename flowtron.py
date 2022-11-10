@@ -22,6 +22,20 @@ from torch import nn, Tensor
 from torch.nn import functional as F
 
 
+def get_gate_mask_from_lengths(lengths):
+    """Constructs binary mask from a 1D torch tensor of input lengths
+
+    Args:
+        lengths (torch.tensor): 1D tensor
+    Returns:
+        mask (torch.tensor): num_sequences x max_length x 1 binary tensor
+    """
+    max_len = torch.max(lengths).item()
+    ids = torch.arange(0, max_len, out=torch.cuda.LongTensor(max_len))
+    mask = (ids < lengths.unsqueeze(1)).bool()
+    return mask
+
+
 def get_mask_from_lengths(lengths):
     """Constructs binary mask from a 1D torch tensor of input lengths
 
@@ -113,21 +127,22 @@ class MaskedInstanceNorm1d(nn.InstanceNorm1d):
 
 
 class AttentionConditioningLayer(nn.Module):
-    """Adapted from the LocationLayer in https://github.com/NVIDIA/tacotron2/blob/master/model.py
-    1D Conv model over a concatenation of the previous attention and the accumulated attention values
-    """
-    def __init__(self, input_dim=2, attention_n_filters=32, attention_kernel_sizes=[5, 3],
-                 attention_dim=640):
+    """Adapted from the LocationLayer in
+    https://github.com/NVIDIA/tacotron2/blob/master/model.py
+    1D Conv model over a concatenation of the previous attention and the
+    accumulated attention values """
+    def __init__(self, input_dim=2, attention_n_filters=32,
+                 attention_kernel_sizes=[5, 3], attention_dim=640):
         super(AttentionConditioningLayer, self).__init__()
 
-        self.location_conv_hidden = ConvNorm(input_dim, attention_n_filters,
-                                             kernel_size=attention_kernel_sizes[0],
-                                             padding=None, bias=True, stride=1,
-                                             dilation=1, w_init_gain='relu')
-        self.location_conv_out = ConvNorm(attention_n_filters, attention_dim,
-                                          kernel_size=attention_kernel_sizes[1],
-                                          padding=None, bias=True, stride=1,
-                                          dilation=1, w_init_gain='sigmoid')
+        self.location_conv_hidden = ConvNorm(
+            input_dim, attention_n_filters,
+            kernel_size=attention_kernel_sizes[0], padding=None, bias=True,
+            stride=1, dilation=1, w_init_gain='relu')
+        self.location_conv_out = ConvNorm(
+            attention_n_filters, attention_dim,
+            kernel_size=attention_kernel_sizes[1], padding=None, bias=True,
+            stride=1, dilation=1, w_init_gain='sigmoid')
         self.conv_layers = nn.Sequential(self.location_conv_hidden,
                                          nn.ReLU(),
                                          self.location_conv_out,
@@ -137,20 +152,60 @@ class AttentionConditioningLayer(nn.Module):
         return self.conv_layers(attention_weights_cat)
 
 
+class AttentionCTCLoss(torch.nn.Module):
+    def __init__(self, blank_logprob=-1):
+        super(AttentionCTCLoss, self).__init__()
+        self.log_softmax = torch.nn.LogSoftmax(dim=3)
+        self.blank_logprob = blank_logprob
+        self.CTCLoss = nn.CTCLoss(zero_infinity=True)
+
+    def forward(self, attn, in_lens, out_lens, attn_logprob):
+        assert attn_logprob is not None
+        key_lens = in_lens
+        query_lens = out_lens
+        attn_logprob_padded = F.pad(input=attn_logprob,
+                                    pad=(1, 0, 0, 0, 0, 0, 0, 0),
+                                    value=self.blank_logprob)
+        cost_total = 0.0
+        for bid in range(attn_logprob.shape[0]):
+            target_seq = torch.arange(1, key_lens[bid]+1).unsqueeze(0)
+            curr_logprob = attn_logprob_padded[bid].permute(1, 0, 2)[
+                :query_lens[bid],
+                :,
+                :key_lens[bid]+1]
+            curr_logprob = self.log_softmax(curr_logprob[None])[0]
+            ctc_cost = self.CTCLoss(curr_logprob, target_seq,
+                                    input_lengths=query_lens[bid:bid+1],
+                                    target_lengths=key_lens[bid:bid+1])
+            cost_total += ctc_cost
+        cost = cost_total/attn_logprob.shape[0]
+        return cost
+
+
 class FlowtronLoss(torch.nn.Module):
-    def __init__(self, sigma=1.0, gm_loss=False, gate_loss=True):
+    def __init__(self, sigma=1.0, gm_loss=False, gate_loss=True,
+                 use_ctc_loss=False, ctc_loss_weight=0.0,
+                 blank_logprob=-1):
         super(FlowtronLoss, self).__init__()
         self.sigma = sigma
         self.gate_criterion = nn.BCEWithLogitsLoss(reduction='none')
         self.gm_loss = gm_loss
         self.gate_loss = gate_loss
+        self.use_ctc_loss = use_ctc_loss
+        self.ctc_loss_weight = ctc_loss_weight
+        self.blank_logprob = blank_logprob
+        self.attention_loss = AttentionCTCLoss(
+            blank_logprob=self.blank_logprob)
 
-    def forward(self, model_output, gate_target, lengths):
-        z, log_s_list, gate_pred, mean, log_var, prob = model_output
+    def forward(self, model_output, gate_target,
+                in_lengths, out_lengths, is_validation=False):
+        z, log_s_list, gate_pred, attn_list, attn_logprob_list, \
+            mean, log_var, prob = model_output
 
         # create mask for outputs computed on padded data
-        mask = get_mask_from_lengths(lengths).transpose(0, 1)[..., None]        
-        mask = mask.float()
+        mask = get_mask_from_lengths(out_lengths).transpose(0, 1)[..., None]
+        mask_inverse = ~mask
+        mask, mask_inverse = mask.float(), mask_inverse.float()
         n_mel_dims = z.size(2)
         n_elements = mask.sum()
         for i, log_s in enumerate(log_s_list):
@@ -180,14 +235,44 @@ class FlowtronLoss(torch.nn.Module):
         loss = loss / (n_elements * n_mel_dims)
 
         gate_loss = torch.zeros(1, device=z.device)
-        if self.gate_loss:
+        if self.gate_loss > 0:
             gate_pred = (gate_pred * mask)
             gate_pred = gate_pred[..., 0].permute(1, 0)
             gate_loss = self.gate_criterion(gate_pred, gate_target)
             gate_loss = gate_loss.permute(1, 0) * mask[:, :, 0]
             gate_loss = gate_loss.sum() / n_elements
 
-        return loss, gate_loss
+        loss_ctc = torch.zeros_like(gate_loss, device=z.device)
+        if self.use_ctc_loss:
+            for cur_flow_idx, flow_attn in enumerate(attn_list):
+                cur_attn_logprob = attn_logprob_list[cur_flow_idx]
+                # flip and send log probs for back step
+                if cur_flow_idx % 2 != 0:
+                    if cur_attn_logprob is not None:
+                        for k in range(cur_attn_logprob.size(0)):
+                            cur_attn_logprob[k] = cur_attn_logprob[k].roll(
+                                -out_lengths[k].item(),
+                                dims=0)
+                        cur_attn_logprob = torch.flip(cur_attn_logprob, (1, ))
+                cur_flow_ctc_loss = self.attention_loss(
+                    flow_attn.unsqueeze(1),
+                    in_lengths,
+                    out_lengths,
+                    attn_logprob=cur_attn_logprob.unsqueeze(1))
+
+                # flip the logprob back to be in backward direction
+                if cur_flow_idx % 2 != 0:
+                    if cur_attn_logprob is not None:
+                        cur_attn_logprob = torch.flip(cur_attn_logprob, (1, ))
+                        for k in range(cur_attn_logprob.size(0)):
+                            cur_attn_logprob[k] = cur_attn_logprob[k].roll(
+                                out_lengths[k].item(),
+                                dims=0)
+                loss_ctc += cur_flow_ctc_loss
+
+            # make CTC loss independent of number of flows by taking mean
+            loss_ctc = loss_ctc / float(len(attn_list))
+        return loss, gate_loss, loss_ctc
 
 
 class LinearNorm(torch.nn.Module):
@@ -237,8 +322,10 @@ class GaussianMixture(torch.nn.Module):
         self.prob_layer = LinearNorm(n_hidden, n_components)
 
         if not fixed_gaussian:
-            self.mean_layer = LinearNorm(n_hidden, n_mel_channels * n_components)
-            self.log_var_layer = LinearNorm(n_hidden, n_mel_channels * n_components)
+            self.mean_layer = LinearNorm(
+                n_hidden, n_mel_channels * n_components)
+            self.log_var_layer = LinearNorm(
+                n_hidden, n_mel_channels * n_components)
         else:
             mean = self.generate_mean(n_mel_channels, n_components, mean_scale)
             log_var = self.generate_log_var(n_mel_channels, n_components)
@@ -247,7 +334,8 @@ class GaussianMixture(torch.nn.Module):
 
     def generate_mean(self, n_dimensions, n_components, scale=3):
         means = torch.eye(n_dimensions).float()
-        ids = np.random.choice(range(n_dimensions), n_components, replace=False)
+        ids = np.random.choice(
+            range(n_dimensions), n_components, replace=False)
         means = means[ids] * scale
         means = means.transpose(0, 1)
         means = means[None]
@@ -300,9 +388,10 @@ class MelEncoder(nn.Module):
                             int(encoder_embedding_dim / 2), 1,
                             bidirectional=True)
 
-    def run_padded_sequence(self, sorted_idx, unsort_idx, lens, padded_data, recurrent_model):
-        """Sorts input data by previded ordering (and un-ordering) and runs the packed data
-        through the recurrent model
+    def run_padded_sequence(self, sorted_idx, unsort_idx,
+                            lens, padded_data, recurrent_model):
+        """Sorts input data by previded ordering (and un-ordering)
+        and runs the packed data through the recurrent model
 
         Args:
             sorted_idx (torch.tensor): 1D sorting index
@@ -331,7 +420,7 @@ class MelEncoder(nn.Module):
                 x.masked_fill_(~mask, 0.)  # zero out padded values before applying convolution
             x = F.dropout(F.relu(norm(conv(x), mask=mask)), 0.5, self.training)
         del mask
-
+        
         x = x.permute(2, 0, 1)  # (N, C, L) -> (L, N, C)
 
         self.lstm.flatten_parameters()
@@ -453,17 +542,19 @@ class Attention(torch.nn.Module):
         self.score_mask_value = -float("inf")
 
     def compute_attention_posterior(self, attn, attn_prior, mask=None,
-                                    eps=1e-8):
+                                    eps=1e-20):
         attn_prior = torch.log(attn_prior.float() + eps)
         attn = torch.log(attn.float() + eps)
         attn_posterior = attn + attn_prior
+
+        attn_logprob = attn_posterior.clone()
 
         if mask is not None:
             attn_posterior.data.masked_fill_(
                 mask.transpose(1, 2), self.score_mask_value)
 
         attn_posterior = self.softmax(attn_posterior)
-        return attn_posterior
+        return attn_posterior, attn_logprob
 
     def forward(self, queries, keys, values, mask=None, attn=None,
                 attn_prior=None):
@@ -486,15 +577,19 @@ class Attention(torch.nn.Module):
             attn = self.softmax(attn)
 
             if attn_prior is not None:
-                attn = self.compute_attention_posterior(attn, attn_prior, mask)
+                attn, attn_logprob = self.compute_attention_posterior(
+                    attn, attn_prior, mask)
+            else:
+                attn_logprob = torch.log(attn.float() + 1e-8)
 
         else:
+            attn_logprob = None
             values = self.value(values)
             values = values.transpose(0, 1)
 
         output = torch.bmm(attn, values)
         output = output.transpose(1, 2)
-        return output, attn
+        return output, attn, attn_logprob
 
 
 class AR_Back_Step(torch.nn.Module):
@@ -517,7 +612,7 @@ class AR_Back_Step(torch.nn.Module):
             if attn_prior is not None:
                 attn_prior[k] = attn_prior[k].roll(out_lens[k].item(), dims=0)
 
-        mel, log_s, gates, attn = self.ar_step(
+        mel, log_s, gates, attn_out, attention_logprobs = self.ar_step(
             mel, text, mask, out_lens, attn_prior)
 
         # move padded zeros back to beginning
@@ -528,11 +623,21 @@ class AR_Back_Step(torch.nn.Module):
 
         if attn_prior is not None:
             attn_prior = torch.flip(attn_prior, (1, ))
-        return torch.flip(mel, (0, )), log_s, gates, attn
+        return (torch.flip(mel, (0, )), log_s, gates,
+                attn_out, attention_logprobs)
 
-    def infer(self, residual, text, attns):
+    def infer(self, residual, text, attns, attn_prior=None):
+        # only need to flip, no need for padding since bs=1
+        if attn_prior is not None:
+            # (B, M, T)
+            attn_prior = torch.flip(attn_prior, (1, ))
+
         residual, attention_weights = self.ar_step.infer(
-            torch.flip(residual, (0, )), text, attns)
+            torch.flip(residual, (0, )), text, attns, attn_prior=attn_prior)
+
+        if attn_prior is not None:
+            attn_prior = torch.flip(attn_prior, (1, ))
+
         residual = torch.flip(residual, (0, ))
         return residual, attention_weights
 
@@ -559,8 +664,9 @@ class AR_Step(torch.nn.Module):
                                       sizes=[n_hidden, n_hidden])
         if add_gate:
             self.gate_threshold = 0.5
-            self.gate_layer = LinearNorm(n_hidden+n_attn_channels, 1, bias=True,
-                                         w_init_gain='sigmoid')
+            self.gate_layer = LinearNorm(
+                n_hidden+n_attn_channels, 1, bias=True,
+                w_init_gain='sigmoid')
 
     def run_padded_sequence(self, sorted_idx, unsort_idx, lens, padded_data,
                             recurrent_model):
@@ -591,23 +697,30 @@ class AR_Step(torch.nn.Module):
     def run_cumm_attn_sequence(self, attn_lstm_outputs, text, mask,
                                attn_prior=None):
         seq_len, bsize, text_feat_dim = text.shape
-        attention_context_all = [] # strangely, appending to a list is faster than pre-allocation
+        # strangely, appending to a list is faster than pre-allocation
+        attention_context_all = []
         attention_weights_all = []
+        attention_logprobs_all = []
         attn_cumm_tensor = text[:, :, 0:1].permute(1, 2, 0)*0
         attention_weights = attn_cumm_tensor*0
         for i in range(attn_lstm_outputs.shape[0]):
             attn_cat = torch.cat((attn_cumm_tensor, attention_weights), 1)
             attn_cond_vector = self.attn_cond_layer(attn_cat).permute(2, 0, 1)
             output = attn_lstm_outputs[i:i+1:, :]
-            attention_context, attention_weights = self.attention_layer(
+            (attention_context, attention_weights,
+                attention_logprobs) = self.attention_layer(
                 output, text*attn_cond_vector, text, mask=mask,
                 attn_prior=attn_prior)
             attention_context_all += [attention_context]
             attention_weights_all += [attention_weights]
+            attention_logprobs_all += [attention_logprobs]
             attn_cumm_tensor = attn_cumm_tensor + attention_weights
         attention_context_all = torch.cat(attention_context_all, 2)
         attention_weights_all = torch.cat(attention_weights_all, 1)
-        return {'attention_context': attention_context_all, 'attention_weights': attention_weights_all}
+        attention_logprobs_all = torch.cat(attention_logprobs_all, 1)
+        return {'attention_context': attention_context_all,
+                'attention_weights': attention_weights_all,
+                'attention_logprobs': attention_logprobs_all}
 
     def forward(self, mel, text, mask, out_lens, attn_prior=None):
         dummy = torch.FloatTensor(1, mel.size(1), mel.size(2)).zero_()
@@ -626,11 +739,14 @@ class AR_Step(torch.nn.Module):
         else:
             attention_hidden = self.attention_lstm(mel0)[0]
         if hasattr(self, 'use_cumm_attention') and self.use_cumm_attention:
-            cumm_attn_output_dict = self.run_cumm_attn_sequence(attention_hidden, text, mask)
+            cumm_attn_output_dict = self.run_cumm_attn_sequence(
+                attention_hidden, text, mask)
             attention_context = cumm_attn_output_dict['attention_context']
             attention_weights = cumm_attn_output_dict['attention_weights']
+            attention_logprobs = cumm_attn_output_dict['attention_logprobs']
         else:
-            attention_context, attention_weights = self.attention_layer(
+            (attention_context, attention_weights,
+                attention_logprobs) = self.attention_layer(
                 attention_hidden, text, text, mask=mask, attn_prior=attn_prior)
 
         attention_context = attention_context.permute(2, 0, 1)
@@ -654,7 +770,7 @@ class AR_Step(torch.nn.Module):
         log_s = decoder_output[:, :, :mel.size(2)]
         b = decoder_output[:, :, mel.size(2):]
         mel = torch.exp(log_s) * mel + b
-        return mel, log_s, gates, attention_weights
+        return mel, log_s, gates, attention_weights, attention_logprobs
 
     def infer(self, residual, text, attns, attn_prior=None):
         attn_cond_vector = 1.0
@@ -666,7 +782,8 @@ class AR_Step(torch.nn.Module):
 
         output = None
         attn = None
-        dummy = torch.cuda.FloatTensor(1, residual.size(1), residual.size(2)).zero_()
+        dummy = torch.cuda.FloatTensor(
+            1, residual.size(1), residual.size(2)).zero_()
         for i in range(0, residual.size(0)):
             if i == 0:
                 attention_hidden, (h, c) = self.attention_lstm(dummy)
@@ -678,16 +795,20 @@ class AR_Step(torch.nn.Module):
                 attn_cond_vector = self.attn_cond_layer(attn_cat).permute(2, 0, 1)
 
             attn = None if attns is None else attns[i][None, None]
-            attention_context, attention_weight = self.attention_layer(
+            attn_prior_i = None if attn_prior is None else attn_prior[:, i][None]
+
+            (attention_context, attention_weight,
+                attention_logprob) = self.attention_layer(
                 attention_hidden, text * attn_cond_vector, text, attn=attn,
-                attn_prior=attn_prior)
+                attn_prior=attn_prior_i)
 
             if hasattr(self, 'use_cumm_attention') and self.use_cumm_attention:
                 attn_cumm_tensor = attn_cumm_tensor + attention_weight
 
             attention_weights.append(attention_weight)
             attention_context = attention_context.permute(2, 0, 1)
-            decoder_input = torch.cat((attention_hidden, attention_context), -1)
+            decoder_input = torch.cat((
+                attention_hidden, attention_context), -1)
             if i == 0:
                 lstm_hidden, (h1, c1) = self.lstm(decoder_input)
             else:
@@ -699,7 +820,9 @@ class AR_Step(torch.nn.Module):
             b = decoder_output[:, :, decoder_output.size(2)//2:]
             output = (residual[i, :, :] - b)/torch.exp(log_s)
             total_output.append(output)
-            if hasattr(self, 'gate_layer') and torch.sigmoid(self.gate_layer(decoder_input)) > self.gate_threshold:
+            if (hasattr(self, 'gate_layer') and
+                    torch.sigmoid(self.gate_layer(decoder_input)) > self.gate_threshold):
+                print("Hitting gate limit")
                 break
         total_output = torch.cat(total_output, 0)
         return total_output, attention_weights
@@ -764,13 +887,16 @@ class Flowtron(torch.nn.Module):
             [text, speaker_vecs.expand(text.size(0), -1, -1)], 2)
         log_s_list = []
         attns_list = []
+        attns_logprob_list = []
         mask = ~get_mask_from_lengths(in_lens)[..., None]
         for i, flow in enumerate(self.flows):
-            mel, log_s, gate, attn = flow(
+            mel, log_s, gate, attn_out, attn_logprob_out = flow(
                 mel, encoder_outputs, mask, out_lens, attn_prior)
             log_s_list.append(log_s)
-            attns_list.append(attn)
-        return mel, log_s_list, gate, attns_list, mean, log_var, prob
+            attns_list.append(attn_out)
+            attns_logprob_list.append(attn_logprob_out)
+        return (mel, log_s_list, gate, attns_list,
+                attns_logprob_list, mean, log_var, prob)
 
     def infer(self, residual, speaker_ids, text, temperature=1.0,
               gate_threshold=0.5, attns=None, attn_prior=None):
@@ -798,9 +924,34 @@ class Flowtron(torch.nn.Module):
         for i, flow in enumerate(reversed(self.flows)):
             attn = None if attns is None else reversed(attns)[i]
             self.set_temperature_and_gate(flow, temperature, gate_threshold)
-            residual, attention_weight = flow.infer(residual, encoder_outputs, attn)
+            residual, attention_weight = flow.infer(
+                residual, encoder_outputs, attn, attn_prior=attn_prior)
             attention_weights.append(attention_weight)
         return residual.permute(1, 2, 0), attention_weights
+
+    def test_invertibility(self, residual, speaker_ids, text, temperature=1.0,
+                           gate_threshold=0.5, attns=None):
+        """Model invertibility check. Call this the same way you would call self.infer()
+
+        Args:
+            residual: 1 x 80 x N_residual tensor of sampled z values
+            speaker_ids: 1 x 1 tensor of integral speaker ids (should be a single value)
+            text (torch.int64): 1 x N_text tensor holding text-token ids
+
+        Returns:
+            error: should be in the order of 1e-5 or less, or there may be an invertibility bug
+        """
+        mel, attn_weights = self.infer(residual, speaker_ids, text)
+        in_lens = torch.LongTensor([text.shape[1]]).cuda()
+        residual_recon, log_s_list, gate, _, _, _, _ = self.forward(mel,
+                                                                    speaker_ids, text,
+                                                                    in_lens, None)
+        residual_permuted = residual.permute(2, 0, 1)
+        if len(self.flows) % 2 == 0:
+            residual_permuted = torch.flip(residual_permuted, (0,))
+            residual_recon = torch.flip(residual_recon, (0,))
+        error = (residual_recon - residual_permuted[0:residual_recon.shape[0]]).abs().mean()
+        return error
 
     @staticmethod
     def set_temperature_and_gate(flow, temperature, gate_threshold):

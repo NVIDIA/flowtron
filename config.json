@@ -8,7 +8,7 @@
         "grad_clip_val": 1,
         "sigma": 1.0,
         "iters_per_checkpoint": 1000,
-        "batch_size": 8,
+        "batch_size": 6,
         "seed": 1234,
         "checkpoint_path": "",
         "ignore_layers": [],
@@ -16,7 +16,12 @@
         "include_layers": ["speaker", "encoder", "embedding"],
         "warmstart_checkpoint_path": "",
         "with_tensorboard": true,
-        "fp16_run": true
+        "fp16_run": true,
+        "gate_loss": true,
+        "use_ctc_loss": true,
+        "ctc_loss_weight": 0.01,
+        "blank_logprob": -8,
+        "ctc_loss_start_iter": 10000
     },
     "data_config": {
         "training_files": "filelists/ljs_audiopaths_text_sid_train_filelist.txt",
@@ -31,8 +36,10 @@
         "mel_fmin": 0.0,
         "mel_fmax": 8000.0,
         "max_wav_value": 32768.0,
-        "use_attn_prior": false,
-        "attn_prior_threshold": 1e-4,
+        "use_attn_prior": true,
+        "attn_prior_threshold": 0.0,
+        "prior_cache_path": "/attention_prior_cache",
+        "betab_scaling_factor": 1.0,
         "keep_ambiguous": false
     },
     "dist_config": {
