@@ -1,0 +1,54 @@
+{
+    "train_config": {
+        "output_directory": "outdir",
+        "epochs": 10000000,
+        "learning_rate": 1e-4,
+        "weight_decay": 1e-6,
+        "sigma": 1.0,
+        "iters_per_checkpoint": 5000,
+        "batch_size": 1,
+        "seed": 1234,
+        "checkpoint_path": "",
+        "ignore_layers": [],
+        "include_layers": ["speaker", "encoder", "embedding"],
+        "warmstart_checkpoint_path": "",
+        "with_tensorboard": true,
+        "fp16_run": false
+    },
+    "data_config": {
+        "training_files": "filelists/libritts_train_clean_100_audiopath_text_sid_shorterthan10s_atleast5min_train_filelist.txt", 
+        "validation_files": "filelists/libritts_train_clean_100_audiopath_text_sid_atleast5min_val_filelist.txt",
+        "text_cleaners": ["flowtron_cleaners"],
+        "p_arpabet": 0.5,
+        "cmudict_path": "data/cmudict_dictionary",
+        "sampling_rate": 22050,
+        "filter_length": 1024,
+        "hop_length": 256,
+        "win_length": 1024,
+        "mel_fmin": 0.0,
+        "mel_fmax": 8000.0,
+        "max_wav_value": 32768.0
+    },
+    "dist_config": {
+        "dist_backend": "nccl",
+        "dist_url": "tcp://localhost:54321"
+    },
+    
+    "model_config": {
+        "n_speakers": 123,
+        "n_speaker_dim": 128,
+        "n_text": 185,
+        "n_text_dim": 512,
+        "n_flows": 2,
+        "n_mel_channels": 80,
+        "n_attn_channels": 640,
+        "n_hidden": 1024,
+        "n_lstm_layers": 2,
+        "mel_encoder_n_hidden": 512,
+        "n_components": 0,
+        "mean_scale": 0.0,
+        "fixed_gaussian": true,
+        "dummy_speaker_embedding": false,
+        "use_gate_layer": true
+    } 
+}
