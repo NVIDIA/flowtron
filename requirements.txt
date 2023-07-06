@@ -2,7 +2,7 @@ matplotlib==3.3.2
 numpy==1.19.2
 inflect==4.1.0
 librosa==0.6.3
-scipy==1.5.2
+scipy==1.10.0
 Unidecode==1.0.22
 pillow
 tensorboardX
